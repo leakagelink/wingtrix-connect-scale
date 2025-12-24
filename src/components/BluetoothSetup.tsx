@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Bluetooth, BluetoothSearching, Check, Signal, Loader2 } from 'lucide-react';
+import { Bluetooth, BluetoothSearching, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { BluetoothDevice } from '@/types/bluetooth';
 import { cn } from '@/lib/utils';
+import wingtrixLogo from '@/assets/wingtrix-logo.png';
 
 interface BluetoothSetupProps {
   devices: BluetoothDevice[];
@@ -44,14 +45,21 @@ export const BluetoothSetup = ({
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-6">
+    <div className="min-h-screen flex flex-col items-center justify-center p-6 pb-20">
       <div className="w-full max-w-md space-y-8 animate-fade-in">
         {/* Header */}
         <div className="text-center space-y-4">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl gradient-primary glow-primary animate-pulse-glow">
-            <Bluetooth className="w-10 h-10 text-primary-foreground" />
+          <div className="relative inline-block">
+            <div className="absolute inset-0 bg-accent/20 blur-2xl rounded-full scale-150 animate-pulse" />
+            <img 
+              src={wingtrixLogo} 
+              alt="Wingtrix Logo" 
+              className="relative w-32 h-auto drop-shadow-xl mx-auto"
+            />
           </div>
-          <h1 className="text-3xl font-bold text-foreground">Wingtrix POS</h1>
+          <h1 className="text-3xl font-bold text-foreground">
+            Wingtrix <span className="text-primary">POS</span>
+          </h1>
           <p className="text-muted-foreground">
             Connect your Bluetooth weighing scale to get started
           </p>

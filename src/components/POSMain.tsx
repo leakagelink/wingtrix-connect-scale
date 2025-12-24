@@ -26,6 +26,7 @@ import {
 import { BluetoothDevice, POSFormData, CalculationResult } from '@/types/bluetooth';
 import { calculateTotal, formatCurrency } from '@/utils/calculations';
 import { cn } from '@/lib/utils';
+import wingtrixLogo from '@/assets/wingtrix-logo.png';
 
 interface POSMainProps {
   connectedDevice: BluetoothDevice;
@@ -86,7 +87,7 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
   const isFormValid = formData.weight > 0 && formData.ratePerKg > 0;
 
   return (
-    <div className="min-h-screen pb-8">
+    <div className="min-h-screen pb-24">
       {/* Header */}
       <header className="glass-card sticky top-0 z-50 px-4 py-3 mx-4 mt-4 rounded-2xl">
         <div className="flex items-center justify-between">
@@ -94,11 +95,13 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
             <Button variant="ghost" size="icon" onClick={onDisconnect} className="mr-1">
               <ArrowLeft className="w-5 h-5" />
             </Button>
-            <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center">
-              <Scale className="w-5 h-5 text-primary-foreground" />
-            </div>
+            <img 
+              src={wingtrixLogo} 
+              alt="Wingtrix" 
+              className="w-10 h-auto"
+            />
             <div>
-              <h1 className="text-lg font-bold text-foreground">Wingtrix POS</h1>
+              <h1 className="text-lg font-bold text-foreground">Wingtrix <span className="text-primary">POS</span></h1>
               <div className="flex items-center gap-1.5 text-xs text-success">
                 <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
                 {connectedDevice.name}
