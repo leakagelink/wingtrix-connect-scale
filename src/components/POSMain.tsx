@@ -10,7 +10,8 @@ import {
   Building2,
   Percent,
   IndianRupee,
-  Loader2
+  Loader2,
+  RotateCcw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -67,6 +68,21 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
     setShowResult(true);
   };
 
+  const handleReset = () => {
+    setFormData({
+      companyName: '',
+      mobileNo: '',
+      itemName: '',
+      weight: 0,
+      ratePerKg: 0,
+      discount: 0,
+      gstType: 'none',
+      gstPercent: 18,
+    });
+    setResult(null);
+    setShowResult(false);
+  };
+
   const isFormValid = formData.weight > 0 && formData.ratePerKg > 0;
 
   return (
@@ -75,6 +91,9 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
       <header className="glass-card sticky top-0 z-50 px-4 py-3 mx-4 mt-4 rounded-2xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" onClick={onDisconnect} className="mr-1">
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
             <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center">
               <Scale className="w-5 h-5 text-primary-foreground" />
             </div>
@@ -86,8 +105,8 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
               </div>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={onDisconnect}>
-            <Bluetooth className="w-5 h-5 text-primary" />
+          <Button variant="ghost" size="icon" onClick={handleReset} title="Reset Form">
+            <RotateCcw className="w-5 h-5 text-muted-foreground" />
           </Button>
         </div>
       </header>
