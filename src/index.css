@@ -157,6 +157,14 @@
     -webkit-text-fill-color: transparent;
     background-clip: text;
   }
+
+  .developer-credit {
+    animation: blink-highlight 2s ease-in-out infinite;
+  }
+
+  .demo-badge {
+    animation: pulse-scale 2s ease-in-out infinite;
+  }
 }
 
 @layer utilities {
@@ -170,6 +178,28 @@
     }
     50% {
       box-shadow: 0 0 40px hsl(175 85% 45% / 0.5);
+    }
+  }
+
+  @keyframes blink-highlight {
+    0%, 100% {
+      opacity: 0.7;
+      text-shadow: 0 0 10px hsl(175 85% 45% / 0.3);
+    }
+    50% {
+      opacity: 1;
+      text-shadow: 0 0 20px hsl(175 85% 45% / 0.6), 0 0 30px hsl(175 85% 45% / 0.4);
+    }
+  }
+
+  @keyframes pulse-scale {
+    0%, 100% {
+      transform: scale(1);
+      opacity: 0.8;
+    }
+    50% {
+      transform: scale(1.05);
+      opacity: 1;
     }
   }
 
