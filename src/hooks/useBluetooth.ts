@@ -7,25 +7,21 @@ const isNative = (): boolean => {
   return typeof (window as any).Capacitor !== 'undefined';
 };
 
-// Classic Bluetooth Serial Plugin interface (for native)
-interface BluetoothSerial {
-  isEnabled(): Promise<{ enabled: boolean }>;
-  enable(): Promise<void>;
-  list(): Promise<Array<{ name: string; address: string; id: string }>>;
-  connect(options: { address: string }): Promise<void>;
-  disconnect(): Promise<void>;
-  read(): Promise<{ data: string }>;
-  write(options: { data: string }): Promise<void>;
-  isConnected(): Promise<{ connected: boolean }>;
-  subscribeRaw(callback: (data: { data: ArrayBuffer }) => void): Promise<void>;
-}
+// Import the Capacitor Bluetooth Communication plugin dynamically
+let BluetoothCommunication: any = null;
 
-// Get the Bluetooth Serial plugin
-const getBluetoothSerial = (): BluetoothSerial | null => {
-  if (isNative() && (window as any).Capacitor?.Plugins?.BluetoothSerial) {
-    return (window as any).Capacitor.Plugins.BluetoothSerial as BluetoothSerial;
+const initBluetoothPlugin = async () => {
+  if (isNative() && !BluetoothCommunication) {
+    try {
+      const module = await import('@yesprasoon/capacitor-bluetooth-communication');
+      BluetoothCommunication = module.BluetoothCommunication;
+      await BluetoothCommunication.initialize();
+      console.log('Bluetooth plugin initialized');
+    } catch (error) {
+      console.error('Failed to initialize Bluetooth plugin:', error);
+    }
   }
-  return null;
+  return BluetoothCommunication;
 };
 
 // Weight scale service UUIDs (for BLE fallback on web)
@@ -40,45 +36,56 @@ export const useBluetooth = () => {
   const [connectedDevice, setConnectedDevice] = useState<BluetoothDeviceInfo | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [lastWeight, setLastWeight] = useState<number>(0);
+  const [isPluginReady, setIsPluginReady] = useState(false);
   const characteristicRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
   const dataBufferRef = useRef<string>('');
+  const listenerRef = useRef<any>(null);
+
+  // Initialize plugin on mount
+  useEffect(() => {
+    if (isNative()) {
+      initBluetoothPlugin().then((plugin) => {
+        if (plugin) {
+          setIsPluginReady(true);
+        }
+      });
+    }
+  }, []);
 
   // Check if Bluetooth is supported
   const isBluetoothSupported = useCallback((): boolean => {
     if (isNative()) {
-      return true; // Native always supports Bluetooth
+      return true;
     }
     return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
   }, []);
 
   // Parse weight data from HC-05 serial data
   const parseWeightData = useCallback((data: string): number | null => {
-    // HC-05 scales typically send weight in formats like:
-    // "12.34kg", "12.34 kg", "12.34", "+12.34kg", "ST,GS,   12.34kg"
     dataBufferRef.current += data;
     
-    // Look for weight patterns
+    // HC-05 scales typically send weight in formats like:
+    // "12.34kg", "12.34 kg", "12.34", "+12.34kg", "ST,GS,   12.34kg"
     const patterns = [
       /([+-]?\d+\.?\d*)\s*kg/i,
-      /([+-]?\d+\.?\d*)\s*g/i,
+      /([+-]?\d+\.?\d*)\s*g(?!s)/i,
       /ST,GS,\s*([+-]?\d+\.?\d*)/i,
       /([+-]?\d+\.?\d*)[\r\n]/,
+      /^\s*([+-]?\d+\.?\d*)\s*$/m,
     ];
 
     for (const pattern of patterns) {
       const match = dataBufferRef.current.match(pattern);
       if (match) {
         let weight = parseFloat(match[1]);
-        // Convert grams to kg if 'g' pattern
-        if (pattern.source.includes('\\s*g') && weight > 100) {
+        if (pattern.source.includes('g(?!s)') && weight > 100) {
           weight = weight / 1000;
         }
-        dataBufferRef.current = ''; // Clear buffer after successful parse
+        dataBufferRef.current = '';
         return weight;
       }
     }
 
-    // Keep only last 100 chars in buffer to prevent memory issues
     if (dataBufferRef.current.length > 100) {
       dataBufferRef.current = dataBufferRef.current.slice(-50);
     }
@@ -86,13 +93,43 @@ export const useBluetooth = () => {
     return null;
   }, []);
 
+  // Setup data listener for native Bluetooth
+  const setupDataListener = useCallback(async () => {
+    if (!isNative() || !BluetoothCommunication) return;
+
+    try {
+      // Remove previous listener if exists
+      if (listenerRef.current) {
+        listenerRef.current.remove();
+      }
+
+      // Add new listener for incoming data
+      listenerRef.current = await BluetoothCommunication.addListener('dataReceived', (data: { data: string }) => {
+        console.log('Received data:', data.data);
+        const weight = parseWeightData(data.data);
+        if (weight !== null && weight > 0) {
+          setLastWeight(weight);
+          toast({
+            title: "Weight Updated",
+            description: `Weight: ${weight.toFixed(2)} kg`,
+          });
+        }
+      });
+    } catch (error) {
+      console.error('Failed to setup data listener:', error);
+    }
+  }, [parseWeightData]);
+
   // Native Bluetooth scan using Classic Bluetooth
   const scanNative = useCallback(async () => {
-    const bluetoothSerial = getBluetoothSerial();
-    if (!bluetoothSerial) {
+    if (!BluetoothCommunication) {
+      await initBluetoothPlugin();
+    }
+
+    if (!BluetoothCommunication) {
       toast({
         title: "Bluetooth Not Available",
-        description: "Bluetooth Serial plugin not found. Please run as native app.",
+        description: "Bluetooth plugin not initialized. Please restart the app.",
         variant: "destructive",
       });
       return;
@@ -102,20 +139,21 @@ export const useBluetooth = () => {
     setDevices([]);
 
     try {
-      // Check if Bluetooth is enabled
-      const { enabled } = await bluetoothSerial.isEnabled();
-      if (!enabled) {
-        await bluetoothSerial.enable();
+      // Enable Bluetooth if not enabled
+      try {
+        await BluetoothCommunication.enableBluetooth();
+      } catch (e) {
+        console.log('Bluetooth already enabled or user denied');
       }
 
-      // Get paired devices
-      const pairedDevices = await bluetoothSerial.list();
+      // Scan for paired devices
+      const result = await BluetoothCommunication.scanDevices();
       
-      const deviceList: BluetoothDeviceInfo[] = pairedDevices.map((device, index) => ({
-        id: device.id || device.address,
+      const deviceList: BluetoothDeviceInfo[] = (result.devices || []).map((device: any, index: number) => ({
+        id: device.address || device.id,
         name: device.name || `Unknown Device ${index + 1}`,
         address: device.address,
-        rssi: -50,
+        rssi: device.rssi || -50,
         connected: false,
       }));
 
@@ -214,11 +252,10 @@ export const useBluetooth = () => {
 
   // Native connect using Classic Bluetooth
   const connectNative = useCallback(async (deviceInfo: BluetoothDeviceInfo): Promise<BluetoothDeviceInfo | null> => {
-    const bluetoothSerial = getBluetoothSerial();
-    if (!bluetoothSerial) {
+    if (!BluetoothCommunication) {
       toast({
         title: "Connection Failed",
-        description: "Bluetooth Serial plugin not available",
+        description: "Bluetooth plugin not available",
         variant: "destructive",
       });
       return null;
@@ -227,7 +264,7 @@ export const useBluetooth = () => {
     setIsConnecting(true);
 
     try {
-      await bluetoothSerial.connect({ address: deviceInfo.address });
+      await BluetoothCommunication.connect({ address: deviceInfo.address });
 
       const connectedDev: BluetoothDeviceInfo = {
         ...deviceInfo,
@@ -236,19 +273,8 @@ export const useBluetooth = () => {
 
       setConnectedDevice(connectedDev);
 
-      // Subscribe to incoming data
-      await bluetoothSerial.subscribeRaw((data) => {
-        const decoder = new TextDecoder('utf-8');
-        const text = decoder.decode(data.data);
-        const weight = parseWeightData(text);
-        if (weight !== null) {
-          setLastWeight(weight);
-          toast({
-            title: "Weight Updated",
-            description: `Weight: ${weight.toFixed(2)} kg`,
-          });
-        }
-      });
+      // Setup data listener for incoming weight data
+      await setupDataListener();
 
       toast({
         title: "Connected!",
@@ -261,14 +287,14 @@ export const useBluetooth = () => {
       const err = error as { message?: string };
       toast({
         title: "Connection Failed",
-        description: err.message || "Failed to connect to device",
+        description: err.message || "Failed to connect to device. Make sure the device is paired and in range.",
         variant: "destructive",
       });
       console.error('Connection error:', error);
       setIsConnecting(false);
       return null;
     }
-  }, [parseWeightData]);
+  }, [setupDataListener]);
 
   // Handle weight notification from BLE device
   const handleWeightNotification = useCallback((event: Event) => {
@@ -364,11 +390,13 @@ export const useBluetooth = () => {
   const disconnectDevice = useCallback(async () => {
     if (connectedDevice) {
       try {
-        if (isNative()) {
-          const bluetoothSerial = getBluetoothSerial();
-          if (bluetoothSerial) {
-            await bluetoothSerial.disconnect();
+        if (isNative() && BluetoothCommunication) {
+          // Remove listener
+          if (listenerRef.current) {
+            listenerRef.current.remove();
+            listenerRef.current = null;
           }
+          await BluetoothCommunication.disconnect();
         } else {
           if (characteristicRef.current) {
             await characteristicRef.current.stopNotifications();
@@ -409,23 +437,20 @@ export const useBluetooth = () => {
     }
 
     try {
-      if (isNative()) {
-        // For native, read from serial
-        const bluetoothSerial = getBluetoothSerial();
-        if (bluetoothSerial) {
-          const { data } = await bluetoothSerial.read();
-          const weight = parseWeightData(data);
-          if (weight !== null) {
-            setLastWeight(weight);
-            toast({
-              title: "Weight Read",
-              description: `Weight: ${weight.toFixed(2)} kg`,
-            });
-            return weight;
-          }
+      if (isNative() && BluetoothCommunication) {
+        // For native, send a read command if needed by your scale
+        // Some scales send data continuously, others need a trigger
+        try {
+          // Try sending a common weight request command
+          await BluetoothCommunication.write({ data: 'R\n' });
+        } catch (e) {
+          console.log('Write command not needed or failed');
         }
+
+        // Wait a moment for response
+        await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Return last received weight from subscription
+        // Return last received weight from listener
         if (lastWeight > 0) {
           toast({
             title: "Weight Read",
@@ -433,6 +458,12 @@ export const useBluetooth = () => {
           });
           return lastWeight;
         }
+
+        toast({
+          title: "Waiting for Data",
+          description: "Place item on scale. Weight will update automatically.",
+        });
+        return lastWeight;
       } else {
         // For web (BLE)
         if (connectedDevice.characteristic) {
@@ -477,8 +508,8 @@ export const useBluetooth = () => {
       }
 
       toast({
-        title: "Reading Failed",
-        description: "Unable to read weight. Make sure the scale is sending data.",
+        title: "No Data",
+        description: "Place item on scale and try again.",
         variant: "destructive",
       });
       return 0;
@@ -492,7 +523,16 @@ export const useBluetooth = () => {
       console.error('Weight read error:', error);
       return 0;
     }
-  }, [connectedDevice, lastWeight, parseWeightData]);
+  }, [connectedDevice, lastWeight]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (listenerRef.current) {
+        listenerRef.current.remove();
+      }
+    };
+  }, []);
 
   return {
     devices,
@@ -506,5 +546,6 @@ export const useBluetooth = () => {
     isBluetoothSupported,
     lastWeight,
     isNativeApp: isNative(),
+    isPluginReady,
   };
 };
