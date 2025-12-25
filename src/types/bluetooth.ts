@@ -1,9 +1,14 @@
-export interface BluetoothDevice {
+/// <reference types="web-bluetooth" />
+
+export interface BluetoothDeviceInfo {
   id: string;
   name: string;
   address: string;
   rssi?: number;
   connected: boolean;
+  device?: BluetoothDevice;
+  server?: BluetoothRemoteGATTServer;
+  characteristic?: BluetoothRemoteGATTCharacteristic;
 }
 
 export interface POSFormData {
@@ -26,4 +31,11 @@ export interface CalculationResult {
   igst: number;
   totalGst: number;
   finalAmount: number;
+}
+
+export interface SavedTransaction {
+  id: string;
+  timestamp: Date;
+  formData: POSFormData;
+  result: CalculationResult;
 }
