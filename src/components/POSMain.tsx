@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { 
   Scale, 
   Calculator, 
-  Bluetooth, 
   ArrowLeft, 
   Receipt,
   Package,
@@ -11,7 +10,9 @@ import {
   Percent,
   IndianRupee,
   Loader2,
-  RotateCcw
+  RotateCcw,
+  Printer,
+  Save
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,13 +24,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { BluetoothDevice, POSFormData, CalculationResult } from '@/types/bluetooth';
+import { BluetoothDeviceInfo, POSFormData, CalculationResult, SavedTransaction } from '@/types/bluetooth';
 import { calculateTotal, formatCurrency } from '@/utils/calculations';
 import { cn } from '@/lib/utils';
 import wingtrixLogo from '@/assets/wingtrix-logo.png';
+import { toast } from '@/hooks/use-toast';
 
 interface POSMainProps {
-  connectedDevice: BluetoothDevice;
+  connectedDevice: BluetoothDeviceInfo;
   onDisconnect: () => void;
   onReadWeight: () => Promise<number>;
 }
@@ -38,6 +40,8 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
   const [isReading, setIsReading] = useState(false);
   const [showResult, setShowResult] = useState(false);
   const [result, setResult] = useState<CalculationResult | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
 
   const [formData, setFormData] = useState<POSFormData>({
     companyName: '',
@@ -82,6 +86,180 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
     });
     setResult(null);
     setShowResult(false);
+  };
+
+  const handleSave = async () => {
+    if (!result) return;
+    
+    setIsSaving(true);
+    
+    try {
+      const transaction: SavedTransaction = {
+        id: Date.now().toString(),
+        timestamp: new Date(),
+        formData: { ...formData },
+        result: { ...result },
+      };
+
+      // Get existing transactions from localStorage
+      const existingData = localStorage.getItem('wingtrix_transactions');
+      const transactions: SavedTransaction[] = existingData ? JSON.parse(existingData) : [];
+      
+      // Add new transaction
+      transactions.push(transaction);
+      
+      // Save back to localStorage
+      localStorage.setItem('wingtrix_transactions', JSON.stringify(transactions));
+
+      toast({
+        title: "Saved!",
+        description: "Transaction saved successfully",
+      });
+    } catch (error) {
+      toast({
+        title: "Save Failed",
+        description: "Failed to save transaction",
+        variant: "destructive",
+      });
+    }
+    
+    setIsSaving(false);
+  };
+
+  const handlePrint = async () => {
+    if (!result) return;
+    
+    setIsPrinting(true);
+
+    try {
+      const printContent = `
+        <html>
+        <head>
+          <title>Invoice - Wingtrix POS</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              font-family: 'Segoe UI', Arial, sans-serif; 
+              padding: 20px; 
+              max-width: 80mm; 
+              margin: 0 auto;
+              color: #333;
+            }
+            .header { text-align: center; margin-bottom: 20px; border-bottom: 2px dashed #333; padding-bottom: 15px; }
+            .logo { font-size: 24px; font-weight: bold; color: #0891b2; }
+            .company { font-size: 12px; color: #666; margin-top: 5px; }
+            .date { font-size: 11px; color: #888; margin-top: 5px; }
+            .details { margin: 15px 0; }
+            .row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 12px; }
+            .row.total { font-weight: bold; font-size: 16px; border-top: 2px solid #333; margin-top: 10px; padding-top: 10px; }
+            .row.discount { color: #dc2626; }
+            .row.gst { color: #666; }
+            .customer { border-bottom: 1px dashed #ccc; padding-bottom: 10px; margin-bottom: 10px; }
+            .footer { text-align: center; margin-top: 20px; font-size: 10px; color: #888; border-top: 2px dashed #333; padding-top: 15px; }
+            .demo-badge { background: #f97316; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; display: inline-block; margin-top: 5px; }
+            @media print {
+              body { padding: 10px; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div class="logo">Wingtrix POS</div>
+            <div class="company">${formData.companyName || 'Customer'}</div>
+            <div class="date">${new Date().toLocaleString('en-IN')}</div>
+            <div class="demo-badge">DEMO</div>
+          </div>
+          
+          <div class="customer">
+            ${formData.mobileNo ? `<div class="row"><span>Mobile:</span><span>${formData.mobileNo}</span></div>` : ''}
+            ${formData.itemName ? `<div class="row"><span>Item:</span><span>${formData.itemName}</span></div>` : ''}
+          </div>
+          
+          <div class="details">
+            <div class="row">
+              <span>Weight:</span>
+              <span>${formData.weight.toFixed(2)} kg</span>
+            </div>
+            <div class="row">
+              <span>Rate per kg:</span>
+              <span>₹${formData.ratePerKg.toFixed(2)}</span>
+            </div>
+            <div class="row">
+              <span>Base Amount:</span>
+              <span>₹${result.baseAmount.toFixed(2)}</span>
+            </div>
+            ${result.discountAmount > 0 ? `
+            <div class="row discount">
+              <span>Discount (${formData.discount}%):</span>
+              <span>-₹${result.discountAmount.toFixed(2)}</span>
+            </div>
+            ` : ''}
+            <div class="row">
+              <span>Subtotal:</span>
+              <span>₹${result.amountAfterDiscount.toFixed(2)}</span>
+            </div>
+            ${formData.gstType === 'cgst_sgst' ? `
+            <div class="row gst">
+              <span>CGST (${formData.gstPercent / 2}%):</span>
+              <span>₹${result.cgst.toFixed(2)}</span>
+            </div>
+            <div class="row gst">
+              <span>SGST (${formData.gstPercent / 2}%):</span>
+              <span>₹${result.sgst.toFixed(2)}</span>
+            </div>
+            ` : ''}
+            ${formData.gstType === 'igst' ? `
+            <div class="row gst">
+              <span>IGST (${formData.gstPercent}%):</span>
+              <span>₹${result.igst.toFixed(2)}</span>
+            </div>
+            ` : ''}
+            <div class="row total">
+              <span>TOTAL:</span>
+              <span>₹${result.finalAmount.toFixed(2)}</span>
+            </div>
+          </div>
+          
+          <div class="footer">
+            <p>Thank you for your business!</p>
+            <p>Developed by socilet.in</p>
+          </div>
+        </body>
+        </html>
+      `;
+
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.write(printContent);
+        printWindow.document.close();
+        printWindow.focus();
+        
+        // Wait for content to load then print
+        setTimeout(() => {
+          printWindow.print();
+          printWindow.close();
+        }, 250);
+
+        toast({
+          title: "Print Ready",
+          description: "Print dialog opened",
+        });
+      } else {
+        toast({
+          title: "Print Failed",
+          description: "Please allow popups to print",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Print Failed",
+        description: "Failed to open print dialog",
+        variant: "destructive",
+      });
+    }
+
+    setIsPrinting(false);
   };
 
   const isFormValid = formData.weight > 0 && formData.ratePerKg > 0;
@@ -341,6 +519,48 @@ export const POSMain = ({ connectedDevice, onDisconnect, onReadWeight }: POSMain
                 <span className="text-lg font-semibold text-foreground">Total Amount</span>
                 <span className="price-display">{formatCurrency(result.finalAmount)}</span>
               </div>
+            </div>
+
+            {/* Print & Save Buttons */}
+            <div className="grid grid-cols-2 gap-3 pt-4">
+              <Button
+                onClick={handleSave}
+                disabled={isSaving}
+                variant="glass"
+                size="lg"
+                className="w-full"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-5 h-5" />
+                    Save
+                  </>
+                )}
+              </Button>
+              <Button
+                onClick={handlePrint}
+                disabled={isPrinting}
+                variant="accent"
+                size="lg"
+                className="w-full"
+              >
+                {isPrinting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Printing...
+                  </>
+                ) : (
+                  <>
+                    <Printer className="w-5 h-5" />
+                    Print
+                  </>
+                )}
+              </Button>
             </div>
           </div>
         )}

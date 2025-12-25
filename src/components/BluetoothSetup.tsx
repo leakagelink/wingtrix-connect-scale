@@ -1,17 +1,17 @@
 import { useState } from 'react';
 import { Bluetooth, BluetoothSearching, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { BluetoothDevice } from '@/types/bluetooth';
+import { BluetoothDeviceInfo } from '@/types/bluetooth';
 import { cn } from '@/lib/utils';
 import wingtrixLogo from '@/assets/wingtrix-logo.png';
 
 interface BluetoothSetupProps {
-  devices: BluetoothDevice[];
+  devices: BluetoothDeviceInfo[];
   isScanning: boolean;
   isConnecting: boolean;
-  connectedDevice: BluetoothDevice | null;
+  connectedDevice: BluetoothDeviceInfo | null;
   onScan: () => void;
-  onConnect: (device: BluetoothDevice) => void;
+  onConnect: (device: BluetoothDeviceInfo) => void;
   onContinue: () => void;
 }
 
@@ -24,7 +24,7 @@ export const BluetoothSetup = ({
   onConnect,
   onContinue,
 }: BluetoothSetupProps) => {
-  const [selectedDevice, setSelectedDevice] = useState<BluetoothDevice | null>(null);
+  const [selectedDevice, setSelectedDevice] = useState<BluetoothDeviceInfo | null>(null);
 
   const getSignalStrength = (rssi?: number) => {
     if (!rssi) return 'weak';
