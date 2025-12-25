@@ -30,6 +30,11 @@ const WEIGHT_MEASUREMENT_CHAR = '00002a9d-0000-1000-8000-00805f9b34fb';
 const GENERIC_ACCESS_UUID = '00001800-0000-1000-8000-00805f9b34fb';
 const DEVICE_INFO_UUID = '0000180a-0000-1000-8000-00805f9b34fb';
 
+// Auto-reconnect configuration
+const AUTO_RECONNECT_MAX_ATTEMPTS = 5;
+const AUTO_RECONNECT_DELAY_MS = 2000;
+const CONNECTION_CHECK_INTERVAL_MS = 3000;
+
 export const useBluetooth = () => {
   const [devices, setDevices] = useState<BluetoothDeviceInfo[]>([]);
   const [isScanning, setIsScanning] = useState(false);
@@ -37,9 +42,17 @@ export const useBluetooth = () => {
   const [isConnecting, setIsConnecting] = useState(false);
   const [lastWeight, setLastWeight] = useState<number>(0);
   const [isPluginReady, setIsPluginReady] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [autoReconnectEnabled, setAutoReconnectEnabled] = useState(true);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  
   const characteristicRef = useRef<BluetoothRemoteGATTCharacteristic | null>(null);
   const dataBufferRef = useRef<string>('');
   const listenerRef = useRef<any>(null);
+  const lastConnectedDeviceRef = useRef<BluetoothDeviceInfo | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectionCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const manualDisconnectRef = useRef(false);
 
   // Initialize plugin on mount
   useEffect(() => {
@@ -50,6 +63,19 @@ export const useBluetooth = () => {
         }
       });
     }
+    
+    // Cleanup on unmount
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (connectionCheckIntervalRef.current) {
+        clearInterval(connectionCheckIntervalRef.current);
+      }
+      if (listenerRef.current) {
+        listenerRef.current.remove();
+      }
+    };
   }, []);
 
   // Check if Bluetooth is supported
@@ -64,8 +90,6 @@ export const useBluetooth = () => {
   const parseWeightData = useCallback((data: string): number | null => {
     dataBufferRef.current += data;
     
-    // HC-05 scales typically send weight in formats like:
-    // "12.34kg", "12.34 kg", "12.34", "+12.34kg", "ST,GS,   12.34kg"
     const patterns = [
       /([+-]?\d+\.?\d*)\s*kg/i,
       /([+-]?\d+\.?\d*)\s*g(?!s)/i,
@@ -98,12 +122,10 @@ export const useBluetooth = () => {
     if (!isNative() || !BluetoothCommunication) return;
 
     try {
-      // Remove previous listener if exists
       if (listenerRef.current) {
         listenerRef.current.remove();
       }
 
-      // Add new listener for incoming data
       listenerRef.current = await BluetoothCommunication.addListener('dataReceived', (data: { data: string }) => {
         console.log('Received data:', data.data);
         const weight = parseWeightData(data.data);
@@ -119,6 +141,171 @@ export const useBluetooth = () => {
       console.error('Failed to setup data listener:', error);
     }
   }, [parseWeightData]);
+
+  // Handle weight notification from BLE device
+  const handleWeightNotification = useCallback((event: Event) => {
+    const target = event.target as BluetoothRemoteGATTCharacteristic;
+    const value = target.value;
+    if (value && value.byteLength >= 3) {
+      const weight = value.getUint16(1, true) / 100;
+      setLastWeight(weight);
+      
+      toast({
+        title: "Weight Updated",
+        description: `Weight: ${weight.toFixed(2)} kg`,
+      });
+    }
+  }, []);
+
+  // Check connection status for native
+  const checkNativeConnection = useCallback(async (): Promise<boolean> => {
+    if (!isNative() || !BluetoothCommunication) return false;
+    
+    try {
+      // Try to check if still connected by sending a ping or checking status
+      const result = await BluetoothCommunication.isConnected?.();
+      return result?.connected ?? false;
+    } catch (error) {
+      return false;
+    }
+  }, []);
+
+  // Auto-reconnect function
+  const attemptReconnect = useCallback(async (deviceInfo: BluetoothDeviceInfo) => {
+    if (!autoReconnectEnabled || manualDisconnectRef.current) {
+      return;
+    }
+
+    if (reconnectAttempts >= AUTO_RECONNECT_MAX_ATTEMPTS) {
+      toast({
+        title: "Reconnection Failed",
+        description: `Could not reconnect after ${AUTO_RECONNECT_MAX_ATTEMPTS} attempts. Please reconnect manually.`,
+        variant: "destructive",
+      });
+      setIsReconnecting(false);
+      setReconnectAttempts(0);
+      return;
+    }
+
+    setIsReconnecting(true);
+    setReconnectAttempts(prev => prev + 1);
+
+    toast({
+      title: "Reconnecting...",
+      description: `Attempt ${reconnectAttempts + 1}/${AUTO_RECONNECT_MAX_ATTEMPTS}`,
+    });
+
+    try {
+      if (isNative() && BluetoothCommunication) {
+        await BluetoothCommunication.connect({ address: deviceInfo.address });
+        
+        const connectedDev: BluetoothDeviceInfo = {
+          ...deviceInfo,
+          connected: true,
+        };
+
+        setConnectedDevice(connectedDev);
+        lastConnectedDeviceRef.current = connectedDev;
+        await setupDataListener();
+        startConnectionMonitoring();
+
+        toast({
+          title: "Reconnected!",
+          description: `Successfully reconnected to ${deviceInfo.name}`,
+        });
+
+        setIsReconnecting(false);
+        setReconnectAttempts(0);
+      } else if (deviceInfo.device?.gatt) {
+        const server = await deviceInfo.device.gatt.connect();
+        
+        if (server) {
+          let characteristic: BluetoothRemoteGATTCharacteristic | undefined;
+
+          try {
+            const service = await server.getPrimaryService(WEIGHT_SCALE_SERVICE);
+            characteristic = await service.getCharacteristic(WEIGHT_MEASUREMENT_CHAR);
+            await characteristic.startNotifications();
+            characteristic.addEventListener('characteristicvaluechanged', handleWeightNotification);
+            characteristicRef.current = characteristic;
+          } catch (e) {
+            console.log('Weight scale service not available');
+          }
+
+          const connectedDev: BluetoothDeviceInfo = {
+            ...deviceInfo,
+            connected: true,
+            server: server,
+            characteristic: characteristic,
+          };
+
+          setConnectedDevice(connectedDev);
+          lastConnectedDeviceRef.current = connectedDev;
+
+          toast({
+            title: "Reconnected!",
+            description: `Successfully reconnected to ${deviceInfo.name}`,
+          });
+
+          setIsReconnecting(false);
+          setReconnectAttempts(0);
+        }
+      }
+    } catch (error) {
+      console.error('Reconnection attempt failed:', error);
+      
+      // Schedule next reconnection attempt
+      reconnectTimeoutRef.current = setTimeout(() => {
+        attemptReconnect(deviceInfo);
+      }, AUTO_RECONNECT_DELAY_MS);
+    }
+  }, [autoReconnectEnabled, reconnectAttempts, setupDataListener, handleWeightNotification]);
+
+  // Handle disconnection event
+  const handleDisconnection = useCallback((deviceInfo: BluetoothDeviceInfo) => {
+    if (manualDisconnectRef.current) {
+      manualDisconnectRef.current = false;
+      return;
+    }
+
+    toast({
+      title: "Connection Lost",
+      description: `${deviceInfo.name} was disconnected. Attempting to reconnect...`,
+      variant: "destructive",
+    });
+
+    setConnectedDevice(null);
+    characteristicRef.current = null;
+
+    // Stop connection monitoring
+    if (connectionCheckIntervalRef.current) {
+      clearInterval(connectionCheckIntervalRef.current);
+    }
+
+    // Start auto-reconnect
+    if (autoReconnectEnabled && lastConnectedDeviceRef.current) {
+      reconnectTimeoutRef.current = setTimeout(() => {
+        attemptReconnect(lastConnectedDeviceRef.current!);
+      }, AUTO_RECONNECT_DELAY_MS);
+    }
+  }, [autoReconnectEnabled, attemptReconnect]);
+
+  // Start connection monitoring for native
+  const startConnectionMonitoring = useCallback(() => {
+    if (!isNative()) return;
+
+    if (connectionCheckIntervalRef.current) {
+      clearInterval(connectionCheckIntervalRef.current);
+    }
+
+    connectionCheckIntervalRef.current = setInterval(async () => {
+      const isConnected = await checkNativeConnection();
+      
+      if (!isConnected && connectedDevice && !isReconnecting) {
+        handleDisconnection(connectedDevice);
+      }
+    }, CONNECTION_CHECK_INTERVAL_MS);
+  }, [checkNativeConnection, connectedDevice, isReconnecting, handleDisconnection]);
 
   // Native Bluetooth scan using Classic Bluetooth
   const scanNative = useCallback(async () => {
@@ -139,14 +326,12 @@ export const useBluetooth = () => {
     setDevices([]);
 
     try {
-      // Enable Bluetooth if not enabled
       try {
         await BluetoothCommunication.enableBluetooth();
       } catch (e) {
         console.log('Bluetooth already enabled or user denied');
       }
 
-      // Scan for paired devices
       const result = await BluetoothCommunication.scanDevices();
       
       const deviceList: BluetoothDeviceInfo[] = (result.devices || []).map((device: any, index: number) => ({
@@ -262,6 +447,7 @@ export const useBluetooth = () => {
     }
 
     setIsConnecting(true);
+    manualDisconnectRef.current = false;
 
     try {
       await BluetoothCommunication.connect({ address: deviceInfo.address });
@@ -272,9 +458,10 @@ export const useBluetooth = () => {
       };
 
       setConnectedDevice(connectedDev);
+      lastConnectedDeviceRef.current = connectedDev;
 
-      // Setup data listener for incoming weight data
       await setupDataListener();
+      startConnectionMonitoring();
 
       toast({
         title: "Connected!",
@@ -282,6 +469,7 @@ export const useBluetooth = () => {
       });
 
       setIsConnecting(false);
+      setReconnectAttempts(0);
       return connectedDev;
     } catch (error: unknown) {
       const err = error as { message?: string };
@@ -294,26 +482,12 @@ export const useBluetooth = () => {
       setIsConnecting(false);
       return null;
     }
-  }, [setupDataListener]);
-
-  // Handle weight notification from BLE device
-  const handleWeightNotification = useCallback((event: Event) => {
-    const target = event.target as BluetoothRemoteGATTCharacteristic;
-    const value = target.value;
-    if (value && value.byteLength >= 3) {
-      const weight = value.getUint16(1, true) / 100;
-      setLastWeight(weight);
-      
-      toast({
-        title: "Weight Updated",
-        description: `Weight: ${weight.toFixed(2)} kg`,
-      });
-    }
-  }, []);
+  }, [setupDataListener, startConnectionMonitoring]);
 
   // Web connect using BLE
   const connectWeb = useCallback(async (deviceInfo: BluetoothDeviceInfo): Promise<BluetoothDeviceInfo | null> => {
     setIsConnecting(true);
+    manualDisconnectRef.current = false;
 
     try {
       if (!deviceInfo.device) {
@@ -346,15 +520,11 @@ export const useBluetooth = () => {
       };
 
       setConnectedDevice(connectedDev);
+      lastConnectedDeviceRef.current = connectedDev;
       
+      // Listen for disconnection with auto-reconnect
       deviceInfo.device.addEventListener('gattserverdisconnected', () => {
-        toast({
-          title: "Disconnected",
-          description: `${deviceInfo.name} was disconnected`,
-          variant: "destructive",
-        });
-        setConnectedDevice(null);
-        characteristicRef.current = null;
+        handleDisconnection(connectedDev);
       });
 
       toast({
@@ -363,6 +533,7 @@ export const useBluetooth = () => {
       });
 
       setIsConnecting(false);
+      setReconnectAttempts(0);
       return connectedDev;
     } catch (error: unknown) {
       const err = error as { message?: string };
@@ -375,7 +546,7 @@ export const useBluetooth = () => {
       setIsConnecting(false);
       return null;
     }
-  }, [handleWeightNotification]);
+  }, [handleWeightNotification, handleDisconnection]);
 
   // Unified connect function
   const connectToDevice = useCallback(async (deviceInfo: BluetoothDeviceInfo): Promise<BluetoothDeviceInfo | null> => {
@@ -388,10 +559,27 @@ export const useBluetooth = () => {
 
   // Disconnect from device
   const disconnectDevice = useCallback(async () => {
+    // Mark as manual disconnect to prevent auto-reconnect
+    manualDisconnectRef.current = true;
+    
+    // Clear any pending reconnect attempts
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    
+    // Stop connection monitoring
+    if (connectionCheckIntervalRef.current) {
+      clearInterval(connectionCheckIntervalRef.current);
+      connectionCheckIntervalRef.current = null;
+    }
+
+    setIsReconnecting(false);
+    setReconnectAttempts(0);
+
     if (connectedDevice) {
       try {
         if (isNative() && BluetoothCommunication) {
-          // Remove listener
           if (listenerRef.current) {
             listenerRef.current.remove();
             listenerRef.current = null;
@@ -419,11 +607,42 @@ export const useBluetooth = () => {
       }
       
       setConnectedDevice(null);
+      lastConnectedDeviceRef.current = null;
       setDevices([]);
       setLastWeight(0);
       dataBufferRef.current = '';
     }
   }, [connectedDevice]);
+
+  // Toggle auto-reconnect
+  const toggleAutoReconnect = useCallback((enabled: boolean) => {
+    setAutoReconnectEnabled(enabled);
+    
+    if (!enabled) {
+      // Cancel any pending reconnection attempts
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      setIsReconnecting(false);
+      setReconnectAttempts(0);
+    }
+  }, []);
+
+  // Cancel reconnection manually
+  const cancelReconnect = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    setIsReconnecting(false);
+    setReconnectAttempts(0);
+    
+    toast({
+      title: "Reconnection Cancelled",
+      description: "Auto-reconnect has been cancelled.",
+    });
+  }, []);
 
   // Read weight from connected device
   const readWeight = useCallback(async (): Promise<number> => {
@@ -438,19 +657,14 @@ export const useBluetooth = () => {
 
     try {
       if (isNative() && BluetoothCommunication) {
-        // For native, send a read command if needed by your scale
-        // Some scales send data continuously, others need a trigger
         try {
-          // Try sending a common weight request command
           await BluetoothCommunication.write({ data: 'R\n' });
         } catch (e) {
           console.log('Write command not needed or failed');
         }
 
-        // Wait a moment for response
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Return last received weight from listener
         if (lastWeight > 0) {
           toast({
             title: "Weight Read",
@@ -465,7 +679,6 @@ export const useBluetooth = () => {
         });
         return lastWeight;
       } else {
-        // For web (BLE)
         if (connectedDevice.characteristic) {
           const value = await connectedDevice.characteristic.readValue();
           const weight = value.getUint16(1, true) / 100;
@@ -525,15 +738,6 @@ export const useBluetooth = () => {
     }
   }, [connectedDevice, lastWeight]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (listenerRef.current) {
-        listenerRef.current.remove();
-      }
-    };
-  }, []);
-
   return {
     devices,
     isScanning,
@@ -547,5 +751,11 @@ export const useBluetooth = () => {
     lastWeight,
     isNativeApp: isNative(),
     isPluginReady,
+    // Auto-reconnect features
+    isReconnecting,
+    autoReconnectEnabled,
+    reconnectAttempts,
+    toggleAutoReconnect,
+    cancelReconnect,
   };
 };
